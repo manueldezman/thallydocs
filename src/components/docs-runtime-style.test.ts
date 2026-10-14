@@ -35,6 +35,13 @@ describe('documentation visual system', () => {
     expect(css).not.toMatch(/\.thally-docs-brand (?:img|svg)\s*[,\{]/)
   })
 
+  it('offsets every in-content anchor target below the sticky header', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const css = await readFile('src/styles/docs-handoff.css', 'utf8')
+    expect(css).toMatch(/\.thally-docs-prose \[id\] \{\s*scroll-margin-top: 6rem;/)
+    expect(css).toMatch(/:is\(\[data-heading\], \.scroll-mt-24, \.thally-docs-prose \[id\]\)/)
+  })
+
   it('brands only the active collection underline, not its neutral label', async () => {
     const { readFile } = await import('node:fs/promises')
     const css = await readFile('src/styles/docs-handoff.css', 'utf8')
@@ -146,6 +153,14 @@ describe('documentation visual system', () => {
     expect(withoutEyebrow).not.toContain('thally-docs-eyebrow')
   })
 
+  it('stacks the copy action under the title on small screens', () => {
+    const doc = { id: 'a', title: 'Single Sign-On', description: 'd', href: '/a' } as DocEntry
+    const markup = renderToStaticMarkup(createElement(DocHeader, { doc }))
+    expect(markup).toContain('flex-col')
+    expect(markup).toContain('sm:flex-row')
+    expect(markup).not.toMatch(/class="flex items-start justify-between/)
+  })
+
   it('can remove the copy action without removing the document header', () => {
     const doc = {
       id: 'guides/writing-content',
@@ -193,7 +208,7 @@ describe('documentation visual system', () => {
     expect(markup).not.toContain('bg-primary')
   })
 
-  it('suppresses a group heading that repeats the tab label', () => {
+  it('omits repeated collection headings beneath tabs while preserving groups and links', () => {
     const markup = renderToStaticMarkup(
       createElement(Sidebar, {
         title: 'Get started',
@@ -210,9 +225,11 @@ describe('documentation visual system', () => {
       }),
     )
 
-    // The tab heading renders once; the identical group heading does not.
-    expect(markup.split('Get started').length - 1).toBe(1)
+    // The header tab supplies the collection label; the sidebar starts at its links.
+    expect(markup).not.toContain('Get started')
     expect(markup).toContain('Design your docs')
+    expect(markup).toContain('href="/"')
+    expect(markup).toContain('href="/components"')
   })
 
   it('renders a rail-free sidebar with a visible current-page state', () => {
@@ -481,5 +498,51 @@ describe('documentation visual system', () => {
     // Focus is a soft halo on the composer, not a saturated accent outline.
     const composerFocus = css.slice(css.indexOf('.thally-docs-chat-composer:focus-within'))
     expect(composerFocus.slice(0, composerFocus.indexOf('}'))).toContain('color-mix')
+  })
+})
+
+describe('Card title cascade', () => {
+  // The prose heading rule styles every h2; a Card title (an h2 inside the prose) must out-rank it.
+  const specificity = async (selector: string): Promise<number> => {
+    const { default: parser } = await import('postcss-selector-parser')
+    let score = 0
+    parser((root) => {
+      root.walk((node) => {
+        if (node.type === 'class' || node.type === 'attribute') score += 10
+        if (node.type === 'tag') score += 1
+        if (node.type === 'pseudo' && node.value === ':where') node.empty()
+      })
+    }).processSync(selector)
+    return score
+  }
+
+  it('out-ranks the prose h2 rule and sets the card size and margins', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const { default: postcss } = await import('postcss')
+    const root = postcss.parse(await readFile('src/styles/docs-handoff.css', 'utf8'))
+    const rules = new Map<string, Map<string, string>>()
+    root.walkRules((rule) => {
+      const declarations = new Map<string, string>()
+      rule.walkDecls((decl) => { declarations.set(decl.prop, decl.value) })
+      for (const selector of rule.selectors) rules.set(selector.trim().replace(/\s+/g, ' '), declarations)
+    })
+    const prose = '.thally-docs-prose :where(h2)'
+    const title = '.thally-docs-prose .thally-docs-card-title'
+    expect(rules.has(prose)).toBe(true)
+    expect(await specificity(title)).toBeGreaterThan(await specificity(prose))
+    expect(rules.get(title)?.get('font-size')).toBe('1rem')
+    expect(rules.get(title)?.get('line-height')).toBe('1.5rem')
+    expect(rules.get(title)?.get('margin-block')).toBe('0')
+    // The stacked-icon gap comes from an attribute rule, which also out-ranks the prose margin.
+    expect(await specificity(`${title}[data-icon-stacked]`)).toBeGreaterThan(await specificity(prose))
+    expect(rules.get(`${title}[data-icon-stacked]`)?.get('margin-top')).toBe('1rem')
+  })
+
+  it('renders a stacked icon card title without heading ids, anchors or TOC markers', () => {
+    const html = renderToStaticMarkup(createElement(Card, { title: 'Scrape', icon: 'flame', href: '/scrape' }, 'Body'))
+    const title = html.match(/<h2[^>]*>/)?.[0] ?? ''
+    expect(title).toContain('thally-docs-card-title')
+    expect(title).toContain('data-icon-stacked')
+    expect(title).not.toMatch(/\bid=|data-heading/)
   })
 })

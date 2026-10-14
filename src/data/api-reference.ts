@@ -1,8 +1,12 @@
 import { cache } from 'react'
 import { apiReferenceConfig } from '@/config/api-reference'
-import { getSpecConfig, loadSpec } from '@/lib/openapi/fetch'
+import { getSpecConfig, loadAuthoredSpecDocument, loadSpec } from '@/lib/openapi/fetch'
 import { buildOperationKey, normalizeSpec } from '@/lib/openapi/normalize'
+import type { NavigationSection, SidebarCollection } from '@/data/docs'
 import type { NormalizedOperation, NormalizedSpec } from '@/lib/openapi/types'
+import { findSpecForRef, type OpenApiFrontmatterRef } from '@/lib/openapi/page-frontmatter'
+import { pageReferenceState } from '@/lib/openapi/publication'
+import type { SupplementalSearchRecord } from '@thallylabs/core/search'
 
 export interface ApiNavigationItem {
   id: string
@@ -32,15 +36,28 @@ function resolveSpecId(specId?: string) {
   return apiReferenceConfig.specs.some((spec) => spec.id === specId) ? specId : apiReferenceConfig.defaultSpecId
 }
 
+/**
+ * Normalization is pure in (spec config, raw document), and `React.cache` does
+ * not memoize outside a render (the Try It relay, route handlers), so keep the
+ * result per spec. It is tied to the raw document the spec cache handed out:
+ * whenever that cache serves a new document, the old result is not reused.
+ */
+const normalizedSpecs = new WeakMap<object, { document: unknown; spec: NormalizedSpec }>()
+
 const getNormalizedSpec = cache(async (specId?: string): Promise<NormalizedSpec> => {
   if (apiReferenceConfig.specs.length === 0) return { operations: [], config: {} as NormalizedSpec['config'], servers: [] }
   const resolvedSpecId = resolveSpecId(specId)
   const config = getSpecConfig(apiReferenceConfig, resolvedSpecId)
   const resolved = await loadSpec(config)
-  return normalizeSpec(resolved)
+  const hit = normalizedSpecs.get(config)
+  if (hit && hit.document === resolved.document) return hit.spec
+  const spec = normalizeSpec(resolved)
+  normalizedSpecs.set(config, { document: resolved.document, spec })
+  return spec
 })
 
-export const getApiOperationNodes = cache(async (specId?: string): Promise<Array<ApiOperationNode>> => {
+/** Every operation of one spec, including a page-only spec's, for frontmatter and Try It lookups. */
+const getSpecOperationNodes = cache(async (specId?: string): Promise<Array<ApiOperationNode>> => {
   const spec = await getNormalizedSpec(specId)
   return spec.operations
     .filter((operation) => !operation.hidden)
@@ -54,10 +71,20 @@ export const getApiOperationNodes = cache(async (specId?: string): Promise<Array
     })
 })
 
+const isPageOnlySpec = (specId?: string) =>
+  apiReferenceConfig.specs.find((spec) => spec.id === resolveSpecId(specId))?.pageOnly === true
+
+/** Operations that get their own `/api/<spec>/...` page: none for a page-only spec. */
+export const getApiOperationNodes = cache(async (specId?: string): Promise<Array<ApiOperationNode>> =>
+  isPageOnlySpec(specId) ? [] : getSpecOperationNodes(specId))
+
 export const getAllApiOperationNodes = cache(async (): Promise<Array<ApiOperationNode>> => {
   const nodesPerSpec = await Promise.all(apiReferenceConfig.specs.map((spec) => getApiOperationNodes(spec.id)))
   return nodesPerSpec.flat()
 })
+
+const getEveryOperationNode = cache(async (): Promise<Array<ApiOperationNode>> =>
+  (await Promise.all(apiReferenceConfig.specs.map((spec) => getSpecOperationNodes(spec.id)))).flat())
 
 export async function getApiOperationBySlug(slugSegments?: Array<string>): Promise<ApiOperationNode | null> {
   if (!slugSegments?.length) {
@@ -89,12 +116,89 @@ export async function getApiOperationByKey(
   const key = buildOperationKey(normalizedMethod, path)
 
   if (specId) {
-    const nodes = await getApiOperationNodes(specId)
+    const nodes = await getSpecOperationNodes(specId)
     return nodes.find((node) => node.operation.key === key) ?? null
   }
 
-  const allNodes = await getAllApiOperationNodes()
+  const allNodes = await getEveryOperationNode()
   return allNodes.find((node) => node.operation.key === key) ?? null
+}
+
+export async function getApiWebhookByName(name: string, specId?: string): Promise<ApiOperationNode | null> {
+  if (!name) return null
+  const nodes = specId ? await getSpecOperationNodes(specId) : await getEveryOperationNode()
+  return nodes.find((node) => node.operation.isWebhook && node.operation.path === name) ?? null
+}
+
+/**
+ * Resolve a page's `openapi:` frontmatter. A spec prefix selects that spec
+ * (unknown spec: no match). Without one the default spec is tried first, so
+ * existing pages resolve exactly as before, then the remaining specs in
+ * configured order; a repeat match there resolves to the first with a warning.
+ */
+export async function getApiOperationForFrontmatter(ref: OpenApiFrontmatterRef): Promise<ApiOperationNode | null> {
+  const lookup = (specId: string) => ref.webhook
+    ? getApiWebhookByName(ref.path, specId)
+    : getApiOperationByKey(ref.method, ref.path, specId)
+  if (ref.specRef) {
+    const spec = findSpecForRef(apiReferenceConfig.specs, ref.specRef)
+    return spec ? lookup(spec.id) : null
+  }
+  const inDefault = await lookup(ref.specId)
+  if (inDefault) return inDefault
+  const matches: Array<ApiOperationNode> = []
+  for (const spec of apiReferenceConfig.specs) {
+    if (spec.id === ref.specId) continue
+    try {
+      const node = await lookup(spec.id)
+      if (node) matches.push(node)
+    } catch {
+      // A broken secondary spec must not take down a page that never named it.
+    }
+  }
+  if (matches.length > 1) {
+    console.warn(`[thally] openapi frontmatter "${ref.method} ${ref.path}" matches ${matches.length} specs; using the first. Prefix the spec file to disambiguate.`)
+  }
+  return matches[0] ?? null
+}
+
+/**
+ * `withheld`: the operation exists but is hidden or excluded on purpose, so its
+ * page is not published. `unresolved`: no spec or operation matches (a missing
+ * file, a typo, a spec this build cannot read); the page keeps its authored body.
+ */
+export type FrontmatterOperationLookup =
+  | { node: ApiOperationNode }
+  | { node: null; reason: 'withheld' | 'unresolved' }
+
+/** Like `getApiOperationForFrontmatter`, but says why nothing was found. */
+export async function lookupApiOperationForFrontmatter(ref: OpenApiFrontmatterRef): Promise<FrontmatterOperationLookup> {
+  const node = await getApiOperationForFrontmatter(ref)
+  if (node) return { node }
+  // Default spec first, as the route resolves a bare reference.
+  const configs = [...apiReferenceConfig.specs].sort((a, b) => Number(b.id === apiReferenceConfig.defaultSpecId) - Number(a.id === apiReferenceConfig.defaultSpecId))
+  const specs = await Promise.all(configs.map(async (config) => ({
+    config,
+    document: await loadAuthoredSpecDocument(config).catch(() => undefined),
+  })))
+  const state = pageReferenceState(ref, specs)
+  return { node: null, reason: state === 'hidden' || state === 'excluded' ? 'withheld' : 'unresolved' }
+}
+
+/**
+ * The public path serving the spec a page's `openapi:` resolves to, or
+ * undefined. Only the default spec is published (`/openapi.yaml`, sanitised);
+ * other local specs and remote URLs have no public route, and a remote URL is
+ * never echoed since it may be private. Unresolvable or hidden operations
+ * have none either.
+ */
+export async function servedSpecPathForFrontmatter(ref: OpenApiFrontmatterRef): Promise<string | undefined> {
+  try {
+    const node = await getApiOperationForFrontmatter(ref)
+    return node?.operation.specId === apiReferenceConfig.defaultSpecId ? '/openapi.yaml' : undefined
+  } catch {
+    return undefined
+  }
 }
 
 export async function buildApiNavigation(specId?: string): Promise<Array<ApiNavigationGroup>> {
@@ -126,15 +230,63 @@ export async function buildApiNavigation(specId?: string): Promise<Array<ApiNavi
   return sortNavigationGroups(groups, spec)
 }
 
-export async function getApiOperationSearchIndex() {
+/**
+ * Append generated endpoint sections to every API collection. Each collection
+ * lists the operations of its own spec (the first API tab is the `default`
+ * spec, later ones are keyed by collection id), so several API tabs never show
+ * one another's endpoints.
+ */
+export async function withApiNavigation(
+  collections: Array<SidebarCollection>,
+  hrefPrefix = '',
+): Promise<Array<SidebarCollection>> {
+  return Promise.all(
+    collections.map(async (collection) => {
+      if (!collection.api || collection.api.navigation === false) return collection
+      const groups = await buildApiNavigation(collection.id)
+      const apiSections: Array<NavigationSection> = groups.map((group, index) => ({
+        id: `openapi-${index}`,
+        title: group.title,
+        items: group.items.map((item) => ({
+          id: item.id,
+          title: item.title,
+          href: `${hrefPrefix}${item.href}`,
+          badge: item.badge,
+          description: `${item.method} ${item.path}`,
+        })),
+      }))
+      return { ...collection, sections: [...(collection.sections ?? []), ...apiSections] }
+    }),
+  )
+}
+
+/**
+ * Search records for every published operation, registered with the search
+ * engine as supplemental records (see `src/lib/search/register-doc-source`),
+ * so ⌘K, `/api/search` and MCP `search_docs` rank operations beside pages.
+ * The id is the operation's slug path — the same id docs-index and MCP use.
+ */
+export async function getApiOperationSearchIndex(): Promise<Array<SupplementalSearchRecord>> {
   const nodes = await getAllApiOperationNodes()
-  return nodes.map((node) => ({
-    id: node.operation.id,
-    title: node.operation.title,
-    description: node.operation.description ?? `${node.operation.method} ${node.operation.path}`,
-    href: node.href,
-    keywords: node.operation.tags,
-  }))
+  return nodes.map((node) => {
+    const { operation } = node
+    const parameterNames = (['path', 'query', 'header', 'cookie'] as const)
+      .flatMap((location) => operation.parameters[location].map((param) => param.name))
+    return {
+      id: node.slug.join('/'),
+      type: 'api_operation' as const,
+      title: operation.title,
+      description: operation.description ?? `${operation.method} ${operation.path}`,
+      href: node.href,
+      keywords: operation.tags,
+      // The path, group and parameter names are searchable. The HTTP method is
+      // not: with fuzzy matching, "GET"/"PUT" on every operation would match
+      // ordinary question words ("set", "but") and crowd out pages.
+      body: [operation.path, operation.group, ...parameterNames].filter(Boolean).join(' '),
+      method: operation.method,
+      path: operation.path,
+    }
+  })
 }
 
 function sortNavigationGroups(groups: Array<ApiNavigationGroup>, spec: NormalizedSpec) {

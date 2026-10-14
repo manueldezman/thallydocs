@@ -2,7 +2,6 @@
  * Shared linked surfaces for Card, Tile, and their responsive groups.
  * Card and Tile intentionally share semantics while retaining distinct media scale.
  */
-import Image from 'next/image'
 import type { CSSProperties, ReactNode } from 'react'
 import { ArrowRight } from 'lucide-react'
 import { Icon, type ContentIconTone } from '@/components/mdx/content-icon'
@@ -88,8 +87,16 @@ function ContentCardSurface({ kind, title, href, icon, iconType, iconColor, colo
         : icon}
     </span>
   ) : null
+  // A linked card is not wrapped in <a>: authored links in the body would nest
+  // anchors (invalid HTML, a hydration error). The title carries the link and
+  // stretches over the whole card; body links sit above it (see docs-handoff.css).
+  const linkHref = href && isSafeLink(href) ? href : undefined
+  const external = linkHref ? isExternalLink(linkHref) : false
+  const linkProps = { className: 'thally-docs-card-link no-underline', target: external ? '_blank' : undefined, rel: external ? 'noreferrer' : undefined }
   const titleNode = title ? (
-    <span className={cn('thally-docs-card-title block min-w-0 font-heading text-base font-semibold leading-6 text-foreground', !horizontal && iconNode && 'mt-4')}>{title}</span>
+    <h2 className="thally-docs-card-title not-prose block min-w-0 font-heading text-base font-semibold leading-6 text-foreground" data-icon-stacked={!horizontal && iconNode ? '' : undefined}>
+      {linkHref ? <IntentPrefetchLink href={linkHref} {...linkProps}>{title}</IntentPrefetchLink> : title}
+    </h2>
   ) : null
 
   // The radius is a literal on purpose. Tailwind's `rounded-2xl` maps to
@@ -106,11 +113,13 @@ function ContentCardSurface({ kind, title, href, icon, iconType, iconColor, colo
       data-card-kind={kind}
       data-card-layout={horizontal ? 'horizontal' : 'stacked'}
       data-card-arrow={arrow ? '' : undefined}
+      data-card-external={external ? '' : undefined}
       data-callout={resolvedCallout}
     >
       {showImage ? (
         <div className={cn('relative shrink-0 overflow-hidden bg-muted', horizontal ? 'h-20 w-28 rounded-lg border border-border/40' : cn('w-full', kind === 'tile' ? 'h-44' : 'aspect-[16/9]'))}>
-          <Image src={img as string} alt={title ?? ''} width={1280} height={720} sizes="(min-width: 1024px) 33vw, (min-width: 768px) 50vw, 100vw" className={cn('h-full w-full object-cover', kind === 'tile' && 'transition-transform duration-300 group-hover/card:scale-[1.03]')} />
+          {/* eslint-disable-next-line @next/next/no-img-element -- arbitrary MDX card images cannot use a fixed Next loader. */}
+          <img src={img as string} alt={title ?? ''} loading="lazy" decoding="async" className={cn('h-full w-full object-cover', kind === 'tile' && 'transition-transform duration-300 group-hover/card:scale-[1.03]')} />
         </div>
       ) : null}
       <div className={cn('flex min-w-0 flex-1 flex-col', !horizontal && 'px-6 py-5', arrow && (horizontal ? 'pr-4' : 'pr-10'))}>
@@ -132,13 +141,14 @@ function ContentCardSurface({ kind, title, href, icon, iconType, iconColor, colo
           </span>
         ) : null}
       </div>
+      {linkHref && !title ? (
+        <IntentPrefetchLink href={linkHref} aria-label={typeof cta === 'string' ? cta : linkHref} {...linkProps}>{null}</IntentPrefetchLink>
+      ) : null}
       {arrow ? <ArrowRight className="thally-docs-card-arrow absolute right-5 top-5 h-4 w-4 text-foreground/40 transition group-hover/card:translate-x-[3px] group-hover/card:text-accent" aria-hidden="true" /> : null}
     </article>
   )
 
-  if (!href || !isSafeLink(href)) return content
-  const external = isExternalLink(href)
-  return <IntentPrefetchLink href={href} className="block h-full" target={external ? '_blank' : undefined} rel={external ? 'noreferrer' : undefined}>{content}</IntentPrefetchLink>
+  return content
 }
 
 /** Render a compact documentation card. */

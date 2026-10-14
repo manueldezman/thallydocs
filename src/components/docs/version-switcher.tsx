@@ -3,9 +3,16 @@
 import { useState, useRef, useEffect } from 'react'
 import { ChevronDown, Check } from 'lucide-react'
 import { siteConfig } from '@/data/site'
+import type { DocsNavigationVersion } from '@/data/docs'
 import { cn } from '@/lib/utils'
 
-export function VersionSwitcher() {
+interface VersionSwitcherProps {
+  versions?: Array<DocsNavigationVersion>
+  activeLabel?: string
+}
+
+/** Prefer request-bound docs.json versions; legacy site.ts versions remain supported. */
+export function VersionSwitcher({ versions: configured, activeLabel }: VersionSwitcherProps = {}) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -21,10 +28,14 @@ export function VersionSwitcher() {
     }
   }, [open])
 
-  const versions = siteConfig.versions
-  if (!versions || versions.length < 2) return null
+  const allVersions = configured ?? siteConfig.versions
+  const versions = allVersions?.filter((version) => !('hidden' in version && version.hidden))
+  // A site with several versions keeps the switcher even when hidden ones leave a single entry, as Mintlify does.
+  if (!allVersions || allVersions.length < 2 || !versions?.length) return null
 
-  const current = versions.find((v) => v.current) ?? versions[0]
+  const current = versions.find((version) => version.label === activeLabel)
+    ?? versions.find((version) => ('default' in version && version.default) || ('current' in version && version.current))
+    ?? versions[0]
 
   return (
     <div ref={ref} className="relative">

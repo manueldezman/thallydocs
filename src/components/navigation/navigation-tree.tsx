@@ -5,6 +5,7 @@
 import { ChevronRight } from 'lucide-react'
 import { useState } from 'react'
 import type { NavigationGroup, NavigationNode } from '@/data/docs'
+import { getMethodToken } from '@/components/api/tokens'
 import { Badge } from '@/components/ui/badge'
 import { Icon } from '@/components/mdx/rich-content'
 import { IntentPrefetchLink } from '@/components/navigation/intent-prefetch-link'
@@ -18,6 +19,15 @@ interface NavigationTreeProps {
   showGroupIcons?: boolean
 }
 
+function MethodPill({ method }: { method: string }) {
+  const token = getMethodToken(method)
+  return (
+    <span className={cn('shrink-0 rounded px-1 py-px font-mono text-[10px] font-semibold uppercase leading-4', token.bg, token.text)}>
+      {method === 'DELETE' ? 'DEL' : method}
+    </span>
+  )
+}
+
 function normalizePath(value: string) {
   if (!value || value === '/') return '/'
   return value.endsWith('/') ? value.slice(0, -1) : value
@@ -27,8 +37,13 @@ function matchesPath(href: string, pathname: string) {
   if (!href || /^https?:\/\//i.test(href)) return false
   const normalizedHref = normalizePath(href)
   const normalizedPath = normalizePath(pathname)
-  if (normalizedHref === '/') return normalizedPath === '/'
-  return normalizedPath === normalizedHref || normalizedPath.startsWith(`${normalizedHref}/`)
+  // A page only owns its exact route. Prefix matching is useful for opening a
+  // parent group, but marks both `/guide` and `/guide/advanced` as the current
+  // page when a collection contains a landing page alongside its children.
+  // The home document is also reachable at `/introduction` on many migrated
+  // sites; treat that exact alias as the same page without prefix matching.
+  return normalizedPath === normalizedHref
+    || (normalizedHref === '/' && normalizedPath === '/introduction')
 }
 
 function groupContainsPath(group: NavigationGroup, pathname: string): boolean {
@@ -47,7 +62,7 @@ function NavigationGroupBranch({
   showGroupIcons = true,
 }: NavigationTreeProps & { group: NavigationGroup; depth: number; path: string }) {
   const hasActivePath = groupContainsPath(group, pathname)
-  const [isManuallyOpen, setIsManuallyOpen] = useState(false)
+  const [isManuallyOpen, setIsManuallyOpen] = useState(group.defaultOpen === true)
   const [closedActivePath, setClosedActivePath] = useState<string | null>(null)
   // A newly active route opens its ancestors automatically. Remembering the
   // exact route a reader closed keeps the disclosure responsive without
@@ -142,6 +157,14 @@ function NavigationNodes({
         )}
       >
         <span className="flex min-h-5 items-center gap-2">
+          {showGroupIcons && node.item.icon ? (
+            <Icon
+              {...(/^(\/(?!\/)|https:\/\/)/i.test(node.item.icon) ? { src: node.item.icon } : { icon: node.item.icon })}
+              iconType={node.item.iconType}
+              className="h-3.5 w-3.5 shrink-0 text-foreground/50"
+            />
+          ) : null}
+          {node.item.method ? <MethodPill method={node.item.method} /> : null}
           <span className="line-clamp-2 break-words">{node.item.title}</span>
           {node.item.badge ? <Badge className="shrink-0 text-[10px] uppercase">{node.item.badge}</Badge> : null}
         </span>
