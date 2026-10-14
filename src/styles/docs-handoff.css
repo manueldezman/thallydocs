@@ -202,13 +202,18 @@ body {
   border-bottom-color: var(--docs-accent);
 }
 
+/* Any in-content anchor target (migrated <a id> or wrapper with an id) needs the same offset as headings. */
+.thally-docs-prose [id] {
+  scroll-margin-top: 6rem;
+}
+
 @media (min-width: 881px) {
   .thally-docs-root[data-header-layout='stacked'] {
     --docs-header-height: 104px;
   }
 
   /* The second row must not cover headings reached through the page TOC. */
-  .thally-docs-root[data-header-layout='stacked'] :is([data-heading], .scroll-mt-24) {
+  .thally-docs-root[data-header-layout='stacked'] :is([data-heading], .scroll-mt-24, .thally-docs-prose [id]) {
     scroll-margin-top: calc(var(--docs-header-height, 104px) + 24px);
   }
 }
@@ -343,6 +348,19 @@ body {
   font-weight: 600;
   line-height: 2rem;
   letter-spacing: -0.025em;
+}
+
+/* A Card title is an <h2> inside the prose. This out-ranks the prose heading rule above
+   (and the utilities on the element) so it keeps the card's own size and spacing. */
+.thally-docs-prose .thally-docs-card-title {
+  margin-block: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.5rem;
+}
+
+.thally-docs-prose .thally-docs-card-title[data-icon-stacked] {
+  margin-top: 1rem;
 }
 
 .thally-docs-prose :where(h3) {
@@ -543,10 +561,6 @@ body {
   color: hsl(var(--thally-accent));
 }
 
-.thally-docs-prose a:has(> .thally-docs-card) {
-  text-decoration: none;
-}
-
 .thally-docs-prose :where(h1, h2, h3, h4) a {
   color: inherit;
 }
@@ -724,9 +738,23 @@ html[data-icon-library='tabler'] .thally-icon[data-icon-source='lucide'] > .thal
   margin-bottom: 0;
 }
 
+/* A linked card's title link stretches over the whole card; links authored in
+   the body sit above it so both stay clickable without nesting anchors. */
+.thally-docs-card-link::after {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  content: '';
+}
+
+.thally-docs-card-body a {
+  position: relative;
+  z-index: 2;
+}
+
 /* External cards reveal a corner glyph on hover unless an explicit arrow
    already occupies that corner. */
-a[target='_blank'] > .thally-docs-card:not([data-card-arrow])::after {
+.thally-docs-card[data-card-external]:not([data-card-arrow])::after {
   position: absolute;
   top: 12px;
   right: 15px;
@@ -738,7 +766,7 @@ a[target='_blank'] > .thally-docs-card:not([data-card-arrow])::after {
   transition: opacity 120ms ease;
 }
 
-a[target='_blank']:hover > .thally-docs-card:not([data-card-arrow])::after {
+.thally-docs-card[data-card-external]:hover:not([data-card-arrow])::after {
   opacity: 1;
 }
 
@@ -860,7 +888,12 @@ a[target='_blank']:hover > .thally-docs-card:not([data-card-arrow])::after {
     display: none;
   }
 
-  .thally-docs-topbar-link span {
+  /* navbar.links entries (text links and buttons) keep their label; only the icon-led repo link collapses. */
+  .thally-docs-topbar-link:not([data-topbar-text]) span {
+    display: none;
+  }
+
+  .thally-docs-topbar-link[data-topbar-text] svg {
     display: none;
   }
 }

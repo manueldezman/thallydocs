@@ -12,16 +12,19 @@ const mocks = vi.hoisted(() => ({
 }))
 vi.mock('next/navigation', () => ({ usePathname: () => mocks.pathname }))
 vi.mock('@/data/docs', () => ({ loadSidebarCollections: mocks.loadCollections }))
-vi.mock('@/data/api-reference', () => ({ buildApiNavigation: async () => [] }))
+vi.mock('@/data/api-reference', () => ({ withApiNavigation: async (collections: unknown) => collections }))
 vi.mock('./sidebar-store', () => ({
   useSidebarCollectionsStore: (selector: (state: { collectionsByScope: typeof mocks.snapshots }) => unknown) => selector({ collectionsByScope: mocks.snapshots }),
 }))
 vi.mock('./sidebar-hydrator', () => ({ SidebarCollectionsHydrator: () => null }))
 vi.mock('@/components/layout/top-bar', () => ({
-  TopBar: ({ activeCollectionId }: { activeCollectionId: string }) => createElement('nav', { 'data-active': activeCollectionId }),
+  TopBar: ({ activeCollectionId, collections }: { activeCollectionId: string; collections: Array<SidebarCollection> }) => createElement('nav', { 'data-active': activeCollectionId, 'data-visible': collections.map((item) => item.id).join(',') }),
 }))
 vi.mock('@/components/navigation/sidebar', () => ({
-  Sidebar: ({ activeCollectionId }: { activeCollectionId: string }) => createElement('aside', { 'data-active': activeCollectionId }),
+  Sidebar: ({ activeCollectionId, sections }: { activeCollectionId: string; sections: SidebarCollection['sections'] }) => createElement('aside', {
+    'data-active': activeCollectionId,
+    'data-hrefs': sections.flatMap((section) => section.items.map((item) => item.href)).join(','),
+  }),
 }))
 vi.mock('@/components/layout/footer', () => ({ Footer: () => null }))
 vi.mock('@/components/layout/sections', () => ({ PageContainer: ({ children }: { children: ReactNode }) => children }))
@@ -40,11 +43,12 @@ function collections(prefix = ''): Array<SidebarCollection> {
   ]
 }
 
-function shellMarkup(initialCollections = collections()) {
+function shellMarkup(initialCollections = collections(), navigationVersions?: Array<{ label: string; prefix: string; href: string; default?: boolean }>) {
   return renderToStaticMarkup(
     <SiteShell
       initialCollections={initialCollections}
       navigationPresentation={{ display: 'tabs' }}
+      navigationVersions={navigationVersions}
       i18nConfig={{ defaultLocale: 'en', locales: [{ code: 'en', label: 'English' }, { code: 'zh-Hans', label: 'Chinese' }] }}
       identity={{ name: 'Documentation', description: '', repoUrl: '', links: [] }}
     >
@@ -66,9 +70,30 @@ describe('localized collection selection', () => {
     expect(markup).toContain('<aside data-active="guides"')
   })
 
+  it('keeps server-rendered sidebar links inside the locale before the snapshot hydrates', () => {
+    expect(shellMarkup()).toContain('data-hrefs="/zh-Hans/guides/fees-monetization/faq"')
+    mocks.pathname = '/guides/fees-monetization/faq'
+    expect(shellMarkup()).toContain('data-hrefs="/guides/fees-monetization/faq"')
+  })
+
+  it('shows only the active version tabs on default and deep version routes', () => {
+    const versioned: Array<SidebarCollection> = [
+      { id: 'v2-docs', label: 'Documentation', version: 'v2', sections: [{ title: 'Start', items: [{ id: 'introduction', title: 'Introduction', href: '/' }] }] },
+      { id: 'v1-docs', label: 'Documentation', version: 'v1', sections: [{ title: 'Start', items: [{ id: 'v1/introduction', title: 'Introduction', href: '/v1/introduction' }] }] },
+    ]
+    const versions = [{ label: 'v2', prefix: '', href: '/introduction', default: true }, { label: 'v1', prefix: 'v1', href: '/v1/introduction' }]
+    mocks.pathname = '/introduction'
+    expect(shellMarkup(versioned, versions)).toContain('data-visible="v2-docs"')
+    mocks.pathname = '/v1/introduction'
+    expect(shellMarkup(versioned, versions)).toContain('data-visible="v1-docs"')
+    versioned[1].sections[0].items.push({ id: 'v1/scrape', title: 'Scrape', href: '/api-reference/v1-endpoint/scrape' })
+    mocks.pathname = '/api-reference/v1-endpoint/scrape'
+    expect(shellMarkup(versioned, versions)).toContain('data-visible="v1-docs"')
+  })
+
   it('keeps Guides selected after the localized snapshot arrives', async () => {
     const hydration = await LocalizedSidebarHydrator({ locale: 'zh-Hans' })
-    expect(mocks.loadCollections).toHaveBeenCalledWith('zh-Hans')
+    expect(mocks.loadCollections).toHaveBeenCalledWith('zh-Hans', expect.objectContaining({ isAuthenticated: false }))
     expect(hydration.props.collections.find((collection: SidebarCollection) => collection.id === 'overview')?.href).toBeUndefined()
     mocks.snapshots['locale:zh-Hans'] = hydration.props.collections
     const markup = shellMarkup()

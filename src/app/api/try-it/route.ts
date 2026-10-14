@@ -2,22 +2,26 @@
  * Bounded OpenAPI request relay for the reader-facing Try It console.
  *
  * The browser supplies parameters, never authority: the target method, path,
- * and origin must match an operation in the site owner's published spec.
+ * and origin must match an operation in the site owner's published spec, or
+ * a manual `api:` page whose operation the server re-derives from that page.
  */
 
 import { lookup } from 'node:dns/promises'
 import ipaddr from 'ipaddr.js'
 import { NextResponse, type NextRequest } from 'next/server'
 import { getApiOperationByKey } from '@/data/api-reference'
+import { getApiPlaygroundTimeoutMs } from '@/data/docs'
 import type { NormalizedOperation } from '@/lib/openapi/types'
 import { readBoundedJson } from '@/lib/http/bounded-json'
+import { getReaderAuthConfig } from '@/lib/reader-auth/config'
+import { canReaderAccessUnmarkedContent } from '@/lib/reader-auth/access'
+import { getReaderContextFromRequest } from '@/lib/reader-auth/context'
 
 export const runtime = 'nodejs'
 
 const MAX_ENVELOPE_BYTES = 384 * 1024
 const MAX_UPSTREAM_BODY_BYTES = 256 * 1024
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-const REQUEST_TIMEOUT_MS = 10_000
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'])
 const BLOCKED_HEADERS = new Set([
   'cf-connecting-ip',
@@ -55,15 +59,24 @@ function isSemanticOverrideHeader(name: string): boolean {
 
 interface TryItPayload {
   specId?: unknown
+  /** Manual `api:` page id; the operation is re-derived from that page server-side. */
+  page?: unknown
+  /** Locale the manual page was rendered from; must be a configured locale. */
+  locale?: unknown
   operationPath?: unknown
   method?: unknown
   url?: unknown
   headers?: unknown
   body?: unknown
+  /** A binary (multipart) body, base64-encoded; used instead of `body`. */
+  bodyBase64?: unknown
 }
 
+// The relay carries the reader's API key and the API's answer: neither may be cached by a browser, CDN or proxy.
+const NO_STORE = { 'Cache-Control': 'no-store' }
+
 function jsonError(error: string, status: number) {
-  return NextResponse.json({ error }, { status })
+  return NextResponse.json({ error }, { status, headers: NO_STORE })
 }
 
 function escapeRegex(value: string): string {
@@ -140,7 +153,7 @@ function isCloudflareWorkerRuntime(): boolean {
 async function fetchPinnedToAddresses(
   target: URL,
   addresses: Array<ResolvedAddress>,
-  init: { method: string; headers: Record<string, string>; body?: string; signal: AbortSignal },
+  init: { method: string; headers: Record<string, string>; body?: string | Uint8Array; signal: AbortSignal },
 ): Promise<Response> {
   const transport = target.protocol === 'https:'
     ? await import('node:https')
@@ -274,12 +287,16 @@ export async function POST(request: NextRequest) {
     return jsonError('Missing operation identity or URL', 400)
   }
   if (!ALLOWED_METHODS.has(method)) return jsonError('Unsupported HTTP method', 400)
+  if (payload.locale !== undefined && typeof payload.locale !== 'string') return jsonError('Invalid locale', 400)
   if (
     typeof payload.body === 'string' &&
     Buffer.byteLength(payload.body, 'utf8') > MAX_UPSTREAM_BODY_BYTES
   ) {
     return jsonError('Request body is too large', 413)
   }
+  if (payload.bodyBase64 !== undefined && typeof payload.bodyBase64 !== 'string') return jsonError('Invalid request body', 400)
+  const binaryBody = typeof payload.bodyBase64 === 'string' ? new Uint8Array(Buffer.from(payload.bodyBase64, 'base64')) : undefined
+  if (binaryBody && binaryBody.byteLength > MAX_UPSTREAM_BODY_BYTES) return jsonError('Request body is too large', 413)
 
   let target: URL
   try {
@@ -295,7 +312,30 @@ export async function POST(request: NextRequest) {
     return jsonError('Encoded path separators are not allowed', 403)
   }
 
-  const operation = await getApiOperationByKey(method, operationPath, specId)
+  let operation: { operation: NormalizedOperation } | null
+  // The playground may only proxy operations the reader is allowed to read
+  // about: a manual page's own access rules, or the site default for spec
+  // operations. A denied operation answers like an undeclared one.
+  const reader = await getReaderContextFromRequest(request)
+  if (typeof payload.page === 'string') {
+    const { canReaderViewPage } = await import('@/data/docs')
+    if (!(await canReaderViewPage(payload.page, reader, typeof payload.locale === 'string' ? payload.locale : undefined))) {
+      return jsonError('Target does not match a published OpenAPI operation', 403)
+    }
+    const { getManualApiOperation } = await import('@/data/manual-api')
+    // The locale selects which translated file the page is re-read from; the
+    // lookup refuses any locale the site does not configure.
+    const manual = payload.locale === undefined
+      ? await getManualApiOperation(payload.page)
+      : await getManualApiOperation(payload.page, payload.locale)
+    operation = manual && manual.method === method && manual.path === operationPath
+      ? { operation: manual }
+      : null
+  } else {
+    operation = canReaderAccessUnmarkedContent(reader, getReaderAuthConfig())
+      ? await getApiOperationByKey(method, operationPath, specId)
+      : null
+  }
   if (
     !operation ||
     operation.operation.isWebhook ||
@@ -307,7 +347,7 @@ export async function POST(request: NextRequest) {
   if (!headers) return jsonError('Invalid request headers', 400)
 
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), getApiPlaygroundTimeoutMs())
   const startedAt = Date.now()
   try {
     // Cloudflare's `global_fetch_strictly_public` compatibility flag performs
@@ -319,10 +359,7 @@ export async function POST(request: NextRequest) {
     const requestInit = {
       method,
       headers,
-      body:
-        shouldIncludeBody(method) && typeof payload.body === 'string'
-          ? payload.body
-          : undefined,
+      body: !shouldIncludeBody(method) ? undefined : (binaryBody ?? (typeof payload.body === 'string' ? payload.body : undefined)),
       signal: controller.signal,
     }
     const response = isCloudflareWorkerRuntime()
@@ -339,7 +376,7 @@ export async function POST(request: NextRequest) {
       headers: Object.fromEntries(response.headers.entries()),
       body: textBody,
       duration: Date.now() - startedAt,
-    })
+    }, { headers: NO_STORE })
   } catch (error) {
     if (error instanceof Error && error.message === 'private_target') {
       return jsonError('Private or unsafe targets are not allowed', 403)

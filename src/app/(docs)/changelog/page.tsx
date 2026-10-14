@@ -1,13 +1,17 @@
-import { notFound } from 'next/navigation'
 import { DocLayout } from '@/components/docs/doc-layout'
-import { getBreadcrumbs } from '@/data/docs'
+import { getBreadcrumbs, getSeoConfig } from '@/data/docs'
+import { getReaderContext } from '@/lib/reader-auth/context'
+import { canReaderViewResolvedDoc, denyDocumentAccess } from '@/lib/reader-auth/page-gate'
 import { getDocFromParams } from '@/data/get-doc'
+import { pageFullTitle } from '@/lib/page-meta'
+import { resolveBuildSiteConfig } from '@/lib/site-config'
 import { getSiteUrl } from '@/lib/site-url'
 import { buildOgImageUrl, formatOgBreadcrumb, formatOgDisplayUrl } from '@/lib/og'
 
 export async function generateMetadata() {
   const doc = await getDocFromParams(['changelog'])
   if (!doc) return {}
+  if (!(await canReaderViewResolvedDoc(doc, await getReaderContext()))) return {}
   const siteUrl = getSiteUrl()
   const ogImageUrl = buildOgImageUrl({
     title: doc.title,
@@ -16,8 +20,15 @@ export async function generateMetadata() {
     url: formatOgDisplayUrl(doc.href, siteUrl),
   })
 
-  return {
+  const fullTitle = pageFullTitle({
     title: doc.title,
+    ogTitle: doc.ogTitle,
+    siteName: resolveBuildSiteConfig().name,
+    separator: getSeoConfig().titleSeparator,
+  })
+
+  return {
+    title: fullTitle ? { absolute: fullTitle } : doc.title,
     description: doc.description,
     alternates: { canonical: `${siteUrl}${doc.href}` },
     openGraph: {
@@ -35,8 +46,9 @@ export async function generateMetadata() {
 }
 
 export default async function ChangelogPage() {
+  const reader = await getReaderContext()
   const doc = await getDocFromParams(['changelog'])
-  if (!doc) notFound()
+  if (!doc || !(await canReaderViewResolvedDoc(doc, reader))) denyDocumentAccess(reader, '/changelog')
 
   const Content = doc.component
   return (

@@ -7,10 +7,23 @@ import { Readable } from 'node:stream'
 import { NextRequest } from 'next/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getApiOperationByKey } from '@/data/api-reference'
+import { getApiPlaygroundTimeoutMs } from '@/data/docs'
+import { getManualApiOperation } from '@/data/manual-api'
+import { buildManualOperation } from '@/lib/openapi/manual-operation'
 import { POST } from './route'
 
 vi.mock('@/data/api-reference', () => ({
   getApiOperationByKey: vi.fn(),
+}))
+
+vi.mock('@/data/docs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/data/docs')>()),
+  getApiPlaygroundTimeoutMs: vi.fn(() => 60_000),
+  canReaderViewPage: vi.fn(async () => true),
+}))
+
+vi.mock('@/data/manual-api', () => ({
+  getManualApiOperation: vi.fn(),
 }))
 
 vi.mock('node:dns/promises', () => ({
@@ -200,6 +213,88 @@ describe('POST /api/try-it', () => {
     })
   })
 
+  it('forwards a base64 multipart body as raw bytes with its own content type', async () => {
+    vi.mocked(getApiOperationByKey).mockResolvedValue({
+      operation: { specId: 'default', path: '/posts/{id}', method: 'POST', isWebhook: false, servers: [{ url: 'https://api.example.com/v1' }] },
+    } as never)
+    const bytes = Buffer.from([0, 255, 10, 13, 65])
+    const response = await POST(request(allowedPayload({
+      method: 'POST',
+      headers: { 'Content-Type': 'multipart/form-data; boundary=x' },
+      bodyBase64: bytes.toString('base64'),
+    })))
+    expect(response.status).toBe(200)
+    const client = vi.mocked(httpsRequest).mock.results[0].value as { write: ReturnType<typeof vi.fn> }
+    expect(Buffer.from(client.write.mock.calls[0][0]).equals(bytes)).toBe(true)
+    const [options] = vi.mocked(httpsRequest).mock.calls[0] as unknown as [{ headers: Record<string, string> }]
+    expect(options.headers['Content-Type']).toBe('multipart/form-data; boundary=x')
+  })
+
+  it('rejects a base64 body above the byte budget', async () => {
+    vi.mocked(getApiOperationByKey).mockResolvedValue({
+      operation: { specId: 'default', path: '/posts/{id}', method: 'POST', isWebhook: false, servers: [{ url: 'https://api.example.com/v1' }] },
+    } as never)
+    const big = Buffer.alloc(256 * 1024 + 1).toString('base64')
+    const response = await POST(request(allowedPayload({ method: 'POST', bodyBase64: big })))
+    expect(response.status).toBe(413)
+  })
+
+  describe('long calls and the reader key', () => {
+    const hang = () =>
+      vi.mocked(httpsRequest).mockImplementationOnce(((options: { signal: AbortSignal }) => {
+        const client = new EventEmitter() as EventEmitter & { write: () => void; end: () => void }
+        client.write = () => {}
+        client.end = () => {}
+        options.signal.addEventListener('abort', () => client.emit('error', new Error('aborted')))
+        return client as never
+      }) as never)
+
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.mocked(getApiPlaygroundTimeoutMs).mockReturnValue(60_000)
+    })
+
+    async function settle(ms: number) {
+      let result: Response | undefined
+      const pending = POST(request(allowedPayload())).then((response) => { result = response })
+      await vi.advanceTimersByTimeAsync(ms)
+      return { get result() { return result }, pending }
+    }
+
+    it('waits past the old 10 s limit and gives up at 60 s by default', async () => {
+      vi.useFakeTimers()
+      hang()
+      const early = await settle(11_000)
+      expect(early.result).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(49_000)
+      await early.pending
+      expect(early.result?.status).toBe(504)
+    })
+
+    it('uses the configured timeout', async () => {
+      vi.useFakeTimers()
+      vi.mocked(getApiPlaygroundTimeoutMs).mockReturnValue(2_000)
+      hang()
+      const late = await settle(2_100)
+      await late.pending
+      expect(late.result?.status).toBe(504)
+    })
+
+    it('never logs the Authorization header, on success or failure, and forbids caching', async () => {
+      const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))
+      const key = 'Bearer fc-secret-key-123'
+      const ok = await POST(request(allowedPayload({ headers: { Authorization: key } })))
+      vi.mocked(httpsRequest).mockImplementationOnce((() => { throw new Error(`boom ${key}`) }) as never)
+      const failed = await POST(request(allowedPayload({ headers: { Authorization: key } })))
+      const bad = await POST(request(allowedPayload({ url: 'https://evil.example.com/x', headers: { Authorization: key } })))
+      expect([ok.status, failed.status, bad.status]).toEqual([200, 502, 403])
+      for (const response of [ok, failed, bad]) expect(response.headers.get('cache-control')).toBe('no-store')
+      expect(JSON.stringify(spies.flatMap((spy) => spy.mock.calls))).not.toContain('fc-secret-key')
+      expect(await failed.text()).not.toContain('fc-secret-key')
+      spies.forEach((spy) => spy.mockRestore())
+    })
+  })
+
   it('rejects responses above the declared byte budget', async () => {
     vi.stubGlobal('navigator', { userAgent: 'Cloudflare-Workers' })
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
@@ -223,5 +318,149 @@ describe('POST /api/try-it', () => {
 
     expect(response.status).toBe(400)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/try-it for manual api pages', () => {
+  function manual(overrides: Record<string, unknown> = {}) {
+    return {
+      specId: 'manual',
+      path: '/anything/users/{id}',
+      method: 'POST',
+      isWebhook: false,
+      servers: [{ url: 'https://httpbin.org' }],
+      manualPage: 'guides/users',
+      ...overrides,
+    }
+  }
+  function manualPayload(overrides: Record<string, unknown> = {}) {
+    return {
+      specId: 'manual',
+      page: 'guides/users',
+      operationPath: '/anything/users/{id}',
+      method: 'POST',
+      url: 'https://httpbin.org/anything/users/7?verbose=1',
+      headers: {},
+      body: '{}',
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    vi.mocked(getManualApiOperation).mockResolvedValue(manual() as never)
+  })
+
+  it('sends the media type of a synthesized body upstream', async () => {
+    const built = buildManualOperation({
+      pageId: 'guides/users',
+      title: 'Users',
+      api: 'POST https://httpbin.org/anything/users/{id}',
+      mdx: '<ParamField body="name" type="string" />',
+      config: { servers: [] },
+    })!
+    vi.mocked(getManualApiOperation).mockResolvedValue(built as never)
+    vi.stubGlobal('navigator', { userAgent: 'Cloudflare-Workers' })
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}'))
+    vi.stubGlobal('fetch', fetchMock)
+    // The playground seeds its request headers from the operation's prefill.
+    const response = await POST(request(manualPayload({ headers: built.prefill.header, body: built.prefill.body })))
+
+    expect(response.status).toBe(200)
+    const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit]
+    expect(init.headers).toEqual({ 'Content-Type': 'application/json' })
+  })
+
+  it('relays to the origin declared by the page, never consulting spec operations', async () => {
+    const response = await POST(request(manualPayload()))
+    expect(response.status).toBe(200)
+    expect(getManualApiOperation).toHaveBeenCalledWith('guides/users')
+    expect(getApiOperationByKey).not.toHaveBeenCalled()
+  })
+
+  it('refuses a host the page did not declare', async () => {
+    const response = await POST(request(manualPayload({ url: 'https://evil.example.net/anything/users/7' })))
+    expect(response.status).toBe(403)
+  })
+
+  it('refuses a different path or method than the page declares', async () => {
+    expect((await POST(request(manualPayload({ url: 'https://httpbin.org/other' })))).status).toBe(403)
+    expect((await POST(request(manualPayload({ method: 'DELETE' })))).status).toBe(403)
+    expect((await POST(request(manualPayload({ operationPath: '/other' })))).status).toBe(403)
+  })
+
+  it('refuses to proxy for a page the reader may not open, before reading it', async () => {
+    const { canReaderViewPage } = await import('@/data/docs')
+    vi.mocked(canReaderViewPage).mockResolvedValueOnce(false)
+    vi.mocked(getManualApiOperation).mockResolvedValue(manual() as never)
+    const response = await POST(request(manualPayload()))
+    expect(response.status).toBe(403)
+    expect(getManualApiOperation).not.toHaveBeenCalled()
+  })
+
+  it('refuses unknown pages and never falls back to spec operations', async () => {
+    vi.mocked(getManualApiOperation).mockResolvedValue(null)
+    const response = await POST(request(manualPayload({ page: 'nope' })))
+    expect(response.status).toBe(403)
+    expect(getApiOperationByKey).not.toHaveBeenCalled()
+  })
+
+  it('keeps the private-target guard even when the page declares a private server', async () => {
+    for (const server of ['http://127.0.0.1', 'http://localhost:3000', 'http://169.254.169.254', 'http://10.0.0.5']) {
+      vi.mocked(getManualApiOperation).mockResolvedValue(manual({ servers: [{ url: server }] }) as never)
+      const response = await POST(request(manualPayload({ url: `${server}/anything/users/7` })))
+      expect(response.status).toBe(403)
+    }
+  })
+
+  it('forwards the page locale to the lookup', async () => {
+    const response = await POST(request(manualPayload({ locale: 'fr' })))
+    expect(response.status).toBe(200)
+    expect(getManualApiOperation).toHaveBeenCalledWith('guides/users', 'fr')
+  })
+
+  it('rejects a non-string locale with 400', async () => {
+    for (const locale of [{ a: 1 }, 5, ['fr'], null]) {
+      expect((await POST(request(manualPayload({ locale })))).status).toBe(400)
+    }
+    expect(getManualApiOperation).not.toHaveBeenCalled()
+  })
+
+  it('refuses a locale the site does not configure', async () => {
+    vi.mocked(getManualApiOperation).mockResolvedValue(null)
+    const response = await POST(request(manualPayload({ locale: 'guides' })))
+    expect(response.status).toBe(403)
+    expect(getApiOperationByKey).not.toHaveBeenCalled()
+  })
+
+  it('refuses a non-string page id from the client', async () => {
+    const response = await POST(request(manualPayload({ page: { a: 1 } })))
+    expect(response.status).toBe(403)
+  })
+
+  it('passes a hostile string locale or page verbatim to the lookup, which refuses it, and never reads spec operations', async () => {
+    vi.mocked(getManualApiOperation).mockResolvedValue(null)
+    const hostile = ['../fr', '..%2Ffr', '%252e%252e%252f', '..\\', 'fr/../..', 'fr\u0000', '/etc/passwd', 'C:\\x', 'FR', '', '__proto__', 'constructor', 'hasOwnProperty', 'x'.repeat(100_000)]
+    for (const value of hostile) {
+      expect((await POST(request(manualPayload({ locale: value })))).status).toBe(403)
+      expect((await POST(request(manualPayload({ page: value })))).status).toBe(403)
+    }
+    expect(getApiOperationByKey).not.toHaveBeenCalled()
+  })
+
+  it('does not let an own __proto__ key or prototype names in the envelope act as fields', async () => {
+    const body = '{"__proto__":{"page":"guides/users","locale":"fr"},"constructor":{"prototype":{"page":"x"}},'
+      + '"specId":"default","operationPath":"/posts/{id}","method":"GET","url":"https://api.example.com/v1/posts/42","headers":{"__proto__":"x","constructor":"y"}}'
+    const response = await POST(new NextRequest('https://docs.example.com/api/try-it', { method: 'POST', headers: { 'content-type': 'application/json' }, body }))
+    expect(getManualApiOperation).not.toHaveBeenCalled()
+    expect(getApiOperationByKey).toHaveBeenCalled()
+    expect(response.status).toBe(200)
+  })
+
+  it('treats an array or object page id as no page, so only a published spec operation can match', async () => {
+    vi.mocked(getApiOperationByKey).mockResolvedValue(null)
+    for (const page of [['guides/users'], { toString: 'x' }, 7, null, true]) {
+      expect((await POST(request(manualPayload({ page })))).status).toBe(403)
+    }
+    expect(getManualApiOperation).not.toHaveBeenCalled()
   })
 })

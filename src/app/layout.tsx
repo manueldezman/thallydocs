@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-css-tags -- docs.json selects local CSS at runtime. */
 import type { Metadata } from 'next'
 import { Inter, JetBrains_Mono } from 'next/font/google'
 import Script from 'next/script'
@@ -7,9 +8,13 @@ import { Providers } from '@/app/providers'
 import { siteConfig } from '@/data/site'
 import {
   getBannerConfig,
+  getBrandColors,
   getContentIconTone,
   getCustomScriptsConfig,
   getFontsConfig,
+  getSeoConfig,
+  getStylesheetsConfig,
+  getIntegrationsConfig,
   getStructuralTheme,
 } from '@/data/docs'
 import { getBuildIconLibrary } from '@/lib/cloud-link/icon-library'
@@ -19,13 +24,15 @@ import { buildOgImageUrl } from '@/lib/og'
 import { buildSiteJsonLd } from '@/lib/json-ld'
 import { getSiteUrl } from '@/lib/site-url'
 import { JsonLdScript } from '@/components/seo/json-ld-script'
-import { AnalyticsProvider } from '@/components/analytics/analytics-provider'
+import { AnalyticsProvider, GtmNoScript } from '@/components/analytics/analytics-provider'
+import { resolveAnalyticsConfig } from '@/lib/analytics-config'
 import { SiteBanner } from '@/components/layout/site-banner'
 import { WebMcpTools } from '@/components/agent/web-mcp-tools'
 import { CloudHandshake } from '@/components/cloud/cloud-handshake'
 import { localeDirection } from '@/lib/i18n/config'
-import { getBuildI18nConfig } from '@/lib/i18n/request'
+import { getEffectiveI18nConfig } from '@/lib/i18n/request'
 import { resolveBuildSiteConfig } from '@/lib/site-config'
+import { validMetatags } from '@/lib/metatags'
 import { getBuildSiteAppearance } from '@/lib/cloud-link/appearance'
 import { lockedAppearanceScript } from '@/lib/site-appearance'
 import { brandRuntimeCss } from '@/lib/brand-runtime-css'
@@ -120,13 +127,18 @@ export async function generateMetadata(): Promise<Metadata> {
   const effectiveSite = resolveBuildSiteConfig()
   const siteUrl = getSiteUrl()
   const defaultOgImage = buildOgImageUrl({})
+  // A site name that already ends in "Documentation" must not be doubled.
+  const defaultTitle = /documentation$/i.test(effectiveSite.name.trim())
+    ? effectiveSite.name
+    : `${effectiveSite.name} Documentation`
   return {
     metadataBase: new URL(siteUrl),
     title: {
-      default: `${effectiveSite.name} Documentation`,
+      default: defaultTitle,
       template: `%s | ${effectiveSite.name}`,
     },
     description: effectiveSite.description,
+    other: validMetatags(getSeoConfig().metatags),
     // Derived from the request-bound site config so a fork never inherits
     // the baseline's marketing keywords.
     keywords: [effectiveSite.name, `${effectiveSite.name} documentation`, 'docs'],
@@ -144,7 +156,7 @@ export async function generateMetadata(): Promise<Metadata> {
       shortcut: '/api/brand/favicon',
     },
     openGraph: {
-      title: `${effectiveSite.name} Documentation`,
+      title: defaultTitle,
       description: effectiveSite.description,
       url: siteUrl,
       siteName: effectiveSite.name,
@@ -152,7 +164,7 @@ export async function generateMetadata(): Promise<Metadata> {
     },
     twitter: {
       card: 'summary_large_image',
-      title: `${effectiveSite.name} Documentation`,
+      title: defaultTitle,
       description: effectiveSite.description,
       images: [defaultOgImage],
     },
@@ -227,6 +239,17 @@ const brandCss = Object.entries(brandStyle)
 const runtimeNameShim =
   "globalThis.__name ??= (target, value) => Object.defineProperty(target, 'name', { value, configurable: true });"
 
+function documentLocaleScript(locales: ReadonlyArray<{ code: string }>, defaultLocale: string): string {
+  // The root layout is shared with admin and unprefixed routes, so Next cannot
+  // receive the child catch-all's locale as a root param. Set the document
+  // language before the body renders while the article itself stays SSR-tagged.
+  const directions = Object.fromEntries(locales
+    .filter((locale) => locale.code !== defaultLocale)
+    .map((locale) => [locale.code, localeDirection(locale.code)]))
+  const serialized = JSON.stringify(directions).replace(/</g, '\\u003c')
+  return `(() => { const locales = ${serialized}; const code = location.pathname.split('/')[1]; if (Object.hasOwn(locales, code)) { document.documentElement.lang = code; document.documentElement.dir = locales[code]; } })();`
+}
+
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   // These values belong to the immutable release binding, not the compiled
   // module. Resolve them during rendering so content-only publishes can reuse
@@ -235,12 +258,15 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   const structuralTheme = getStructuralTheme()
   const { appearance, background } = getBuildSiteAppearance()
   const hasBackground = Boolean(background.image || background.imageDark || background.decoration !== 'none')
+  const runtimeBrandCss = brandRuntimeCss({ colors: getBrandColors(), ...(hasBackground ? { background } : {}) })
   const contentIconTone = getContentIconTone()
   const iconLibrary = getBuildIconLibrary()
   const themeVars = THEME_VARS[structuralTheme] ?? ''
   const bannerConfig = getBannerConfig()
   const customScripts = getCustomScriptsConfig()
-  const i18n = getBuildI18nConfig()
+  const stylesheets = getStylesheetsConfig()
+  const analyticsConfig = resolveAnalyticsConfig(siteConfig.analytics, getIntegrationsConfig())
+  const i18n = await getEffectiveI18nConfig()
   const effectiveSite = resolveBuildSiteConfig()
   const siteUrl = getSiteUrl()
   const defaultLang = i18n.defaultLocale
@@ -268,9 +294,10 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
       className={cn(fontSans.variable, fontMono.variable)}
     >
       <head>
-        <script id="thally-runtime-name-shim" dangerouslySetInnerHTML={{ __html: runtimeNameShim }} />
+        <Script id="thally-runtime-name-shim" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: runtimeNameShim }} />
+        <Script id="thally-document-locale" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: documentLocaleScript(i18n.locales, defaultLang) }} />
         {!appearance.showToggle && (
-          <script id="thally-locked-appearance" dangerouslySetInnerHTML={{ __html: lockedAppearanceScript(appearance.default) }} />
+          <Script id="thally-locked-appearance" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: lockedAppearanceScript(appearance.default) }} />
         )}
         <JsonLdScript data={siteJsonLd} />
         {/* Google Fonts for custom body/heading fonts set in docs.json */}
@@ -285,16 +312,17 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
         )}
         {/* Brand palette (default) — a :root rule so /api/brand.css can override it */}
         <style>{`:root { ${brandCss} }`}</style>
-        {hasBackground && <style>{brandRuntimeCss({ background })}</style>}
+        {runtimeBrandCss && <style>{runtimeBrandCss}</style>}
         {/* CSS variable overrides for custom fonts */}
         {fontOverrides && <style>{`:root { ${fontOverrides} }`}</style>}
         {/* CSS variable overrides for structural theme (radius, sidebar, nav tabs) */}
         {themeVars && <style>{`:root { ${themeVars} }`}</style>}
         {/* Live admin branding override (theme + accent from the dashboard) — last so it wins */}
-        {/* eslint-disable-next-line @next/next/no-head-element */}
         <link rel="stylesheet" href="/api/brand.css" />
+        {stylesheets.map((href) => <link key={href} rel="stylesheet" href={href} />)}
       </head>
       <body className="min-h-screen bg-background font-sans text-foreground antialiased">
+        <GtmNoScript config={analyticsConfig} />
         {bannerConfig && (
           <SiteBanner
             banner={bannerConfig}
@@ -304,8 +332,8 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
         )}
         <Providers appearance={appearance}>{children}</Providers>
         <CloudHandshake />
-        {siteConfig.analytics && <AnalyticsProvider />}
-        <WebMcpTools />
+        <AnalyticsProvider config={analyticsConfig} />
+        <WebMcpTools defaultLocale={defaultLang} locales={i18n.locales.map((locale) => locale.code)} />
         {customScripts.map((script) => (
           <Script key={script.src} src={script.src} strategy={script.strategy ?? 'afterInteractive'} />
         ))}

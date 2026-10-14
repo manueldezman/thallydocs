@@ -11,6 +11,7 @@ import { Accordion, AccordionGroup } from '@/components/mdx/accordion'
 import { Card, CardGroup, Tile } from '@/components/mdx/content-cards'
 import { Icon } from '@/components/mdx/content-icon'
 import { Badge, Tooltip } from '@/components/mdx/content-inline'
+import { PageSlotsProvider } from '@/components/mdx/page-slots'
 import { Color, Update } from '@/components/mdx/content-metadata'
 
 describe('standalone rich-content primitives', () => {
@@ -23,7 +24,36 @@ describe('standalone rich-content primitives', () => {
     )
     expect(markup).toContain('id="first"')
     expect(markup).toContain('Details')
-    expect(markup.match(/data-radix-collection-item/g)).toHaveLength(2)
+    expect(markup.match(/<summary/g)).toHaveLength(2)
+  })
+
+  it('renders an image-path icon on a Card as an img', () => {
+    const markup = renderToStaticMarkup(createElement(Card, { title: 'ChatGPT', icon: '/images/chatgpt.svg' }, 'x'))
+    expect(markup).toContain('<img src="/images/chatgpt.svg"')
+    expect(renderToStaticMarkup(createElement(Icon, { icon: 'https://cdn.example/a.png' }))).toContain('<img src="https://cdn.example/a.png"')
+  })
+
+  it('keeps collapsed accordion bodies and their headings in the server HTML', () => {
+    const markup = renderToStaticMarkup(
+      createElement(Accordion, { title: 'Closed' }, createElement('h3', { id: 'inside' }, 'Hidden heading'), 'Body text'),
+    )
+    expect(markup).toContain('<details')
+    expect(markup).not.toMatch(/<details[^>]* open/)
+    expect(markup).toContain('<h3 id="inside">Hidden heading</h3>')
+    expect(markup).toContain('Body text')
+  })
+
+  it('honours defaultOpen on a standalone accordion and inside a group', () => {
+    const standalone = renderToStaticMarkup(createElement(Accordion, { id: 'a', title: 'A', defaultOpen: true }, 'x'))
+    expect(standalone).toMatch(/<details[^>]* open/)
+    const grouped = renderToStaticMarkup(
+      createElement(AccordionGroup, null,
+        createElement(Accordion, { id: 'a', title: 'A', defaultOpen: true }, 'x'),
+        createElement(Accordion, { id: 'b', title: 'B' }, 'y'),
+      ),
+    )
+    expect(grouped.match(/<details[^>]* open/g)).toHaveLength(1)
+    expect(grouped).toMatch(/<details[^>]*id="a"[^>]* open|<details[^>]* open[^>]*id="a"/)
   })
 
   it('resolves unknown names through the configured icon library instead of a placeholder glyph', () => {
@@ -39,6 +69,15 @@ describe('standalone rich-content primitives', () => {
     // Names that cannot form a safe URL render nothing at all.
     expect(renderToStaticMarkup(createElement(Icon, { icon: 'not real!' }))).toBe('')
     expect(renderToStaticMarkup(createElement(Icon, { icon: '../etc' }))).toBe('')
+  })
+
+  it('maps Font Awesome Pro-only names to assets that exist instead of a blank mask', () => {
+    const browser = renderToStaticMarkup(createElement(Icon, { icon: 'browser' }))
+    expect(browser).toContain('--thally-icon-fontawesome:url(&quot;https://cdn.jsdelivr.net/npm/lucide-static@')
+    expect(browser).not.toContain('fontawesome-free@7.3.1/svgs/solid/browser.svg')
+    const read = renderToStaticMarkup(createElement(Icon, { icon: 'barcode-read' }))
+    expect(read).toContain('fontawesome-free@7.3.1/svgs/solid/barcode.svg')
+    expect(renderToStaticMarkup(createElement(Icon, { icon: 'code-change' }))).toContain('fontawesome-free@7.3.1/svgs/solid/code-compare.svg')
   })
 
   it('renders brand marks inline under every icon library', () => {
@@ -77,6 +116,20 @@ describe('standalone rich-content primitives', () => {
     expect(unsafe).not.toContain('href=')
   })
 
+  it('never nests anchors when a linked card body contains a link', () => {
+    const markup = renderToStaticMarkup(createElement(Card, { title: 'Repo', href: '/repo' },
+      createElement('a', { href: 'https://github.com/x' }, 'GitHub Repo')))
+    expect(markup.match(/<a /g)).toHaveLength(2)
+    expect(markup).not.toMatch(/<a [^>]*>(?:(?!<\/a>)[\s\S])*<a /)
+    expect(markup).toContain('href="/repo"')
+    expect(markup).toContain('href="https://github.com/x"')
+  })
+
+  it('renders card titles as h2 headings', () => {
+    expect(renderToStaticMarkup(createElement(Card, { title: 'Plain' }))).toMatch(/<h2[^>]*>Plain<\/h2>/)
+    expect(renderToStaticMarkup(createElement(Card, { title: 'Linked', href: '/x' }))).toMatch(/<h2[^>]*><a [^>]*href="\/x"[^>]*>Linked<\/a><\/h2>/)
+  })
+
   it('stacks the icon above the title and hides the arrow unless asked', () => {
     const markup = renderToStaticMarkup(createElement(Card, {
       title: 'Python SDK', icon: 'terminal', href: '/sdks/python',
@@ -110,6 +163,17 @@ describe('standalone rich-content primitives', () => {
     expect(three).toContain('lg:grid-cols-3')
     const fromString = renderToStaticMarkup(createElement(Group, { cols: '4' }, child))
     expect(fromString).toContain('lg:grid-cols-4')
+  })
+
+  it('renders a card image as a plain <img> so any remote host works without a next.config allowlist', () => {
+    const markup = renderToStaticMarkup(createElement(Card, {
+      title: 'Deploy at a subpath',
+      img: 'https://mintlify-assets.b-cdn.net/deploy/vercel.png',
+    }))
+    expect(markup).toContain('<img')
+    expect(markup).not.toContain('srcset')
+    expect(markup).toContain('src="https://mintlify-assets.b-cdn.net/deploy/vercel.png"')
+    expect(markup).toContain('loading="lazy"')
   })
 
   it('renders Mintlify cards with authored JSX icons', () => {
@@ -146,6 +210,15 @@ describe('standalone rich-content primitives', () => {
     expect(compound).toContain('Danger')
     const themed = renderToStaticMarkup(createElement(Color.Item, { name: 'Accent', light: '#7AA600', dark: '#B8EC36' }))
     expect(themed).toContain('light #7AA600, dark #B8EC36')
+  })
+
+  it('keeps tagged updates visible inside a page until a tag filter is selected', () => {
+    const markup = renderToStaticMarkup(
+      createElement(PageSlotsProvider, null, createElement(Update, { label: 'Version 3', tags: ['API', 'BYOK'] }, 'Released.')),
+    )
+    expect(markup).toContain('id="version-3"')
+    expect(markup).not.toContain('hidden=""')
+    expect(markup).toContain('BYOK')
   })
 
   it('renders updates as linkable timeline entries with semantic dates and tags', () => {
