@@ -25,10 +25,15 @@ Use `<Badge>` to highlight status, versions, or categories inline within text or
 
 Place badges next to a page heading to show the status of a feature:
 
-<h2>Webhooks <Badge variant="warning">Beta</Badge></h2>
+{/* An accessible demo heading avoids adding an example to the page TOC. */}
+<div role="heading" aria-level={2} className="mb-[1.125rem] mt-9 font-heading text-2xl font-semibold tracking-[-0.025em]">
+  Webhooks <Badge variant="warning">Beta</Badge>
+</div>
 
 ```mdx
-<h2>Webhooks <Badge variant="warning">Beta</Badge></h2>
+<div role="heading" aria-level={2} className="mb-[1.125rem] mt-9 font-heading text-2xl font-semibold tracking-[-0.025em]">
+  Webhooks <Badge variant="warning">Beta</Badge>
+</div>
 ```
 
 ## Props
