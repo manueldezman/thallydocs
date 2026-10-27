@@ -10,18 +10,22 @@ You need Node.js 22 or later and Git. Prefer a source GitHub repository when ava
 
 ## Migrate and run locally
 
-```bash
-npx --yes @thallylabs/cli@latest migrate https://github.com/example/product --platform auto --yes
-```
+Point the CLI at the GitHub repository that holds your docs. Replace `<USERNAME>` with your GitHub username and `<REPOSITORY>` with that repository's name.
 
 ```bash
-cd product-docs
+npx --yes @thallylabs/cli@latest migrate https://github.com/<USERNAME>/<REPOSITORY> --platform auto --yes
+```
+
+Start the site.
+
+```bash
+cd <REPOSITORY>-docs
 npm run dev
 ```
 
 Open the URL printed by the dev server, normally [http://localhost:3040](http://localhost:3040), to review your docs.
 
-The command clones the repository, detects the platform, converts the pages, installs dependencies, runs the checks and a production build, and makes an initial Git commit. Add an output directory after the URL to change the default `<repo>-docs` name.
+The command clones the repository, detects the platform, converts the pages, installs dependencies, runs the checks and a production build, and makes an initial Git commit. Add an output directory after the URL to change the default `<REPOSITORY>-docs` name.
 
 Read `migration-report.json` before publishing. Installation or validation failures retain the imported files; fix reported failures and rerun `npx --yes @thallylabs/cli@latest check` and `npm run build`. With `--skip-validation`, install dependencies and run both checks yourself.
 
