@@ -82,7 +82,7 @@ Commit your edits, push the project to a new GitHub repository, and connect it i
 git add -A
 git commit -m "docs: review migrated content"
 git branch -M main
-gh repo create product-docs --private --source=. --remote=origin --push
+gh repo create <REPOSITORY>-docs --private --source=. --remote=origin --push
 ```
 
 Choose the generated repository and its production branch, normally `main`. Leave **Docs directory** empty for a project at the repository root, or enter its relative directory in a monorepo. Review the source summary and select **Publish site**.
